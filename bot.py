@@ -3,6 +3,7 @@ import os
 import tempfile
 import re
 import logging
+import subprocess
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, FSInputFile
@@ -11,7 +12,7 @@ from aiogram.enums import ParseMode
 from aiohttp import web
 
 import yt_dlp
-import imageio_ffmpeg
+from ffmpeg_downloader import get_ffmpeg_path
 
 # Получаем токен из переменных окружения Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -26,14 +27,17 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 CAPTION = "🎵 <b>Tipoke Music</b> — https://t.me/tipokeee"
-
-# Регулярка теперь ловит и обычные, и короткие ссылки on.soundcloud.com
 URL_RE = re.compile(r"https?://(?:www\.|m\.|on\.)?soundcloud\.com/\S+")
+
+# Скачиваем ffmpeg при старте (если его еще нет на сервере)
+log.info("Проверка наличия ffmpeg...")
+subprocess.run(["ffdl", "install"], check=False)
+log.info("ffmpeg готов к работе.")
 
 
 def download_track(url: str, out_dir: str) -> str:
-    # Получаем путь к ffmpeg, который установился через pip (imageio-ffmpeg)
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    # Получаем путь к скачанному ffmpeg
+    ffmpeg_path = get_ffmpeg_path()
     
     ydl_opts = {
         "format": "bestaudio/best",
@@ -92,7 +96,7 @@ async def link_handler(message: Message):
     with tempfile.TemporaryDirectory() as tmp:
         try:
             loop = asyncio.get_running_loop()
-            # Запускаем синхронный yt-dlp в отдельном потоке, чтобы не вешать бота
+            # Запускаем скачивание в отдельном потоке
             file_path = await loop.run_in_executor(None, download_track, url, tmp)
         except Exception as e:
             log.exception("download failed")
@@ -125,7 +129,7 @@ async def link_handler(message: Message):
             await status.edit_text(f"❌ Ошибка отправки: {e}")
 
 
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER (Healthcheck) ---
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def health(request):
     return web.Response(text="ok")
 
@@ -134,13 +138,11 @@ async def start_health_server():
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Render автоматически передает нужный порт в переменную PORT
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
 async def main():
-    # Запускаем веб-сервер параллельно с ботом
     await start_health_server()
     await dp.start_polling(bot)
 
