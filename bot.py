@@ -8,10 +8,13 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, FSInputFile
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
+from aiohttp import web
 
 import yt_dlp
+import imageio_ffmpeg
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # задаётся в Render Environment
+# Получаем токен из переменных окружения Render
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
@@ -24,17 +27,21 @@ dp = Dispatcher()
 
 CAPTION = "🎵 <b>Tipoke Music</b> — https://t.me/tipokeee"
 
-URL_RE = re.compile(r"https?://(?:www\.|m\.)?soundcloud\.com/\S+")
+# Регулярка теперь ловит и обычные, и короткие ссылки on.soundcloud.com
+URL_RE = re.compile(r"https?://(?:www\.|m\.|on\.)?soundcloud\.com/\S+")
 
 
 def download_track(url: str, out_dir: str) -> str:
-    """Синхронно скачивает трек через yt-dlp, возвращает путь к файлу."""
+    # Получаем путь к ffmpeg, который установился через pip (imageio-ffmpeg)
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(out_dir, "%(title).80s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "ffmpeg_location": ffmpeg_path, # Указываем yt-dlp, где лежит ffmpeg
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -43,7 +50,6 @@ def download_track(url: str, out_dir: str) -> str:
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        # yt-dlp после постпроцессинга меняет расширение на .mp3
         base = ydl.prepare_filename(info)
         mp3_path = os.path.splitext(base)[0] + ".mp3"
         return mp3_path
@@ -60,20 +66,34 @@ async def start_handler(message: Message):
 
 @dp.message(F.text)
 async def link_handler(message: Message):
+    # Ищем ссылку в тексте сообщения
     match = URL_RE.search(message.text or "")
+    
     if not match:
-        await message.answer("Пришли ссылку на трек SoundCloud.")
-        return
+        # Если в тексте ссылки нет, проверяем скрытые ссылки (превью Telegram)
+        url = None
+        if message.entities:
+            for entity in message.entities:
+                if entity.type == "text_link" and "soundcloud.com" in entity.url:
+                    url = entity.url
+                    break
+        
+        if not url:
+            await message.answer("Пришли ссылку на трек SoundCloud.")
+            return
+    else:
+        url = match.group(0)
 
-    url = match.group(0)
+    # Очищаем ссылку от лишних символов по краям
+    url = url.strip("()[]{}<> \"'")
+
     status = await message.answer("⏳ Скачиваю трек...")
 
     with tempfile.TemporaryDirectory() as tmp:
         try:
             loop = asyncio.get_running_loop()
-            file_path = await loop.run_in_executor(
-                None, download_track, url, tmp
-            )
+            # Запускаем синхронный yt-dlp в отдельном потоке, чтобы не вешать бота
+            file_path = await loop.run_in_executor(None, download_track, url, tmp)
         except Exception as e:
             log.exception("download failed")
             await status.edit_text(f"❌ Не удалось скачать: {e}")
@@ -105,9 +125,24 @@ async def link_handler(message: Message):
             await status.edit_text(f"❌ Ошибка отправки: {e}")
 
 
-async def main():
-    await dp.start_polling(bot)
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER (Healthcheck) ---
+async def health(request):
+    return web.Response(text="ok")
 
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Render автоматически передает нужный порт в переменную PORT
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+async def main():
+    # Запускаем веб-сервер параллельно с ботом
+    await start_health_server()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
